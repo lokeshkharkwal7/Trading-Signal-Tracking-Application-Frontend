@@ -3,6 +3,7 @@ import { getSignals, deleteSignal } from "../../services/api";
 
 // Constants
 const INITIAL_PAGE = 1;
+const REFRESH_INTERVAL = 60000; // 1 minute in milliseconds
 const EMPTY_STATE_MESSAGE = "No signals found";
 const LOADING_MESSAGE = "Loading signals...";
 const END_MESSAGE = "No more signals";
@@ -37,35 +38,72 @@ export default function SignalTable() {
   const [page, setPage] = useState(INITIAL_PAGE);
   const [totalPages, setTotalPages] = useState(INITIAL_PAGE);
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
   const [deletingIds, setDeletingIds] = useState(new Set());
 
   const observerRef = useRef();
   const fetchedPagesRef = useRef(new Set());
+  const intervalRef = useRef(null);
 
   // Fetch signals
-  const fetchSignals = useCallback(async (pageNum) => {
-    if (loading || fetchedPagesRef.current.has(pageNum)) return;
+  const fetchSignals = useCallback(async (pageNum, isRefresh = false) => {
+    if (loading || (!isRefresh && fetchedPagesRef.current.has(pageNum))) return;
 
     try {
-      setLoading(true);
-      fetchedPagesRef.current.add(pageNum);
+      if (isRefresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+      
+      if (!isRefresh) {
+        fetchedPagesRef.current.add(pageNum);
+      }
 
       const response = await getSignals(pageNum);
       const { data, pagination } = response;
 
-      setSignals((prev) => {
-        const uniqueSignals = new Map(prev.map(signal => [signal._id, signal]));
-        data?.forEach(signal => uniqueSignals.set(signal._id, signal));
-        return Array.from(uniqueSignals.values());
-      });
-
-      setTotalPages(pagination.totalPages);
+      if (isRefresh) {
+        // On refresh, replace all data
+        setSignals(data || []);
+        setTotalPages(pagination.totalPages);
+        setPage(INITIAL_PAGE);
+        // Clear fetched pages cache
+        fetchedPagesRef.current.clear();
+        fetchedPagesRef.current.add(INITIAL_PAGE);
+      } else {
+        // On pagination, append data
+        setSignals((prev) => {
+          const uniqueSignals = new Map(prev.map(signal => [signal._id, signal]));
+          data?.forEach(signal => uniqueSignals.set(signal._id, signal));
+          return Array.from(uniqueSignals.values());
+        });
+        setTotalPages(pagination.totalPages);
+      }
+      
+      setLastUpdated(new Date());
     } catch (err) {
       console.error("Fetch error:", err);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, [loading]);
+
+  // Refresh all data (reset and fetch from page 1)
+  const refreshData = useCallback(async () => {
+    if (refreshing) return;
+    
+    // Reset everything
+    setSignals([]);
+    setPage(INITIAL_PAGE);
+    setTotalPages(INITIAL_PAGE);
+    fetchedPagesRef.current.clear();
+    
+    // Fetch fresh data
+    await fetchSignals(INITIAL_PAGE, true);
+  }, [fetchSignals, refreshing]);
 
   // Delete signal
   const handleDelete = useCallback(async (id) => {
@@ -118,6 +156,21 @@ export default function SignalTable() {
     fetchSignals(page);
   }, [page, fetchSignals]);
 
+  // Setup auto-refresh interval
+  useEffect(() => {
+    // Start interval
+    intervalRef.current = setInterval(() => {
+      refreshData();
+    }, REFRESH_INTERVAL);
+
+    // Cleanup interval on unmount
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, [refreshData]);
+
   // Cleanup observer
   useEffect(() => {
     return () => {
@@ -132,6 +185,12 @@ export default function SignalTable() {
       case 'center': return 'text-center';
       default: return 'text-left';
     }
+  };
+
+  // Format last updated time
+  const formatLastUpdated = () => {
+    if (!lastUpdated) return '';
+    return lastUpdated.toLocaleTimeString();
   };
 
   // Memoized table header
@@ -152,7 +211,7 @@ export default function SignalTable() {
 
   // Memoized table body
   const tableBody = useMemo(() => {
-    if (signals.length === 0 && !loading) {
+    if (signals.length === 0 && !loading && !refreshing) {
       return (
         <tbody>
           <tr>
@@ -205,14 +264,57 @@ export default function SignalTable() {
         })}
       </tbody>
     );
-  }, [signals, loading, deletingIds, handleDelete, lastRowRef]);
+  }, [signals, loading, refreshing, deletingIds, handleDelete, lastRowRef]);
 
   return (
     <div className="bg-white rounded-2xl shadow-lg border border-gray-100 p-3">
       <div className="p-6 border-b border-gray-100">
-        <h2 className="text-2xl font-semibold text-gray-800">
-          📊 Trading Dashboard
-        </h2>
+        <div className="flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-semibold text-gray-800">
+              📊 Trading Dashboard
+            </h2>
+            {lastUpdated && (
+              <p className="text-xs text-gray-400 mt-1">
+                Last updated: {formatLastUpdated()}
+              </p>
+            )}
+          </div>
+          
+          <div className="flex items-center gap-3">
+            {/* Auto-refresh indicator */}
+            <div className="flex items-center gap-2 text-xs text-gray-400">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+              </span>
+              <span>Auto-refresh (1min)</span>
+            </div>
+            
+            {/* Refresh button */}
+            <button
+              onClick={refreshData}
+              disabled={refreshing}
+              className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              aria-label="Refresh data"
+            >
+              <svg 
+                className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" 
+                />
+              </svg>
+              {refreshing ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
+        </div>
       </div>
 
       <div className="overflow-x-auto">
@@ -222,23 +324,33 @@ export default function SignalTable() {
         </table>
 
         {/* Loading indicator */}
-        {loading && signals.length === 0 && (
+        {(loading || refreshing) && signals.length === 0 && (
           <div className="flex justify-center items-center py-12">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
-            <span className="ml-3 text-gray-500">{LOADING_MESSAGE}</span>
+            <span className="ml-3 text-gray-500">{refreshing ? 'Refreshing...' : LOADING_MESSAGE}</span>
           </div>
         )}
 
         {/* Loading more indicator */}
-        {loading && signals.length > 0 && (
+        {loading && signals.length > 0 && !refreshing && (
           <div className="flex justify-center items-center py-4">
             <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900"></div>
             <span className="ml-2 text-sm text-gray-500">Loading more...</span>
           </div>
         )}
 
+        {/* Refresh overlay for smooth UX */}
+        {refreshing && signals.length > 0 && (
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex items-center justify-center pointer-events-none">
+            <div className="bg-white rounded-lg shadow-lg px-4 py-2 flex items-center gap-2">
+              <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-gray-900"></div>
+              <span className="text-sm text-gray-700">Updating prices...</span>
+            </div>
+          </div>
+        )}
+
         {/* End message */}
-        {!loading && page >= totalPages && signals.length > 0 && (
+        {!loading && !refreshing && page >= totalPages && signals.length > 0 && (
           <div className="text-center py-6 text-gray-400 text-sm">
             {END_MESSAGE}
           </div>
